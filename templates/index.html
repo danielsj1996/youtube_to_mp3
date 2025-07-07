@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Convertidor YouTube</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="{{ url_for('static', filename='toast.js') }}"></script>
+  <script>
+    // Mostrar miniatura del video
+    function mostrarMiniatura(url) {
+      let videoId = null;
+      try {
+        const urlObj = new URL(url);
+        if (urlObj.hostname.includes('youtu.be')) {
+          videoId = urlObj.pathname.slice(1);
+        } else if (urlObj.hostname.includes('youtube.com')) {
+          videoId = urlObj.searchParams.get('v');
+        }
+      } catch {
+        videoId = null;
+      }
+      const preview = document.getElementById("preview");
+      if (videoId) {
+        preview.src = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+        preview.style.display = "block";
+      } else {
+        preview.style.display = "none";
+      }
+    }
+
+    // Detectar playlist y mostrar selector
+    async function verificarSiEsPlaylist(input) {
+      const url = input.value;
+      const contenedor = document.getElementById("selectorPlaylist");
+      contenedor.innerHTML = "";
+
+      if (!url) {
+        contenedor.style.display = "none";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("url", url);
+
+      try {
+        const resp = await fetch("/detectar_playlist", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!resp.ok) throw new Error("Error al detectar playlist");
+
+        const data = await resp.json();
+        if (data.es_playlist) {
+          const lista = document.createElement("div");
+          lista.innerHTML = "<strong>Selecciona los videos a convertir:</strong><br/>";
+          data.videos.forEach((v, i) => {
+            lista.innerHTML += `
+              <label><input type="checkbox" name="videos" value="${v.url}" checked> ${v.title}</label><br/>
+            `;
+          });
+          contenedor.appendChild(lista);
+          contenedor.style.display = "block";
+        } else {
+          contenedor.style.display = "none";
+        }
+      } catch (e) {
+        contenedor.style.display = "none";
+      }
+    }
+
+    // Convertir audio (playlist o videos)
+    async function convertirAudio(event) {
+      event.preventDefault();
+      const progresoCont = document.getElementById("progreso");
+      const barra = document.getElementById("barraProgreso");
+      const porcentaje = document.getElementById("porcentaje");
+
+      progresoCont.style.display = "block";
+      barra.value = 0;
+      porcentaje.textContent = "0%";
+
+      const form = new FormData(event.target);
+      const videosSeleccionados = [...document.querySelectorAll("input[name='videos']:checked")].map(el => el.value);
+      videosSeleccionados.forEach(url => form.append(`urls`, url));
+
+      try {
+        const resp = await fetch("/convertir", {
+          method: "POST",
+          body: form,
+        });
+
+        if (!resp.ok) {
+          mostrarToast("Error al iniciar la conversión", "error");
+          progresoCont.style.display = "none";
+          return;
+        }
+
+        const { id } = await resp.json();
+
+        // Polling progreso
+        const intervalo = setInterval(async () => {
+          const respProg = await fetch(`/progreso/${id}`);
+          const dataProg = await respProg.json();
+          barra.value = dataProg.porcentaje;
+          porcentaje.textContent = dataProg.porcentaje + "%";
+
+          if (dataProg.porcentaje >= 100) {
+            clearInterval(intervalo);
+            mostrarToast("Conversión completada", "success");
+            window.location.href = `/resultado/${id}`;
+          } else if (dataProg.porcentaje < 0) {
+            clearInterval(intervalo);
+            mostrarToast("Error en la conversión", "error");
+          }
+        }, 1000);
+
+      } catch {
+        mostrarToast("Error inesperado durante la conversión.", "error");
+        progresoCont.style.display = "none";
+      }
+    }
+
+    // Descargar video con barra de progreso
+    async function descargarVideo(event) {
+      event.preventDefault();
+      const form = event.target;
+      const data = new FormData(form);
+
+      const progresoCont = document.getElementById("progreso-video");
+      const barra = document.getElementById("barraProgresoVideo");
+      const porcentaje = document.getElementById("porcentajeVideo");
+
+      progresoCont.style.display = "block";
+      barra.value = 0;
+      porcentaje.textContent = "0%";
+
+      mostrarToast("Iniciando descarga...", "info");
+
+      try {
+        const resp = await fetch("/descargar-video", {
+          method: "POST",
+          body: data,
+        });
+
+        if (!resp.ok) {
+          mostrarToast("Error iniciando descarga", "error");
+          progresoCont.style.display = "none";
+          return;
+        }
+
+        const { id } = await resp.json();
+
+        // Polling progreso
+        const intervalo = setInterval(async () => {
+          const respProg = await fetch(`/progreso/${id}`);
+          const dataProg = await respProg.json();
+          barra.value = dataProg.porcentaje;
+          porcentaje.textContent = dataProg.porcentaje + "%";
+
+          if (dataProg.porcentaje >= 100) {
+            clearInterval(intervalo);
+            mostrarToast("Video listo para descargar", "success");
+            window.location.href = `/resultado/${id}`;
+          } else if (dataProg.porcentaje < 0) {
+            clearInterval(intervalo);
+            mostrarToast("Error en la descarga", "error");
+          }
+        }, 1000);
+
+      } catch {
+        mostrarToast("Error inesperado durante la descarga.", "error");
+        progresoCont.style.display = "none";
+      }
+    }
+
+    // Cambio modo oscuro
+    window.onload = function () {
+      const toggle = document.getElementById("toggleModo");
+      toggle.addEventListener("change", () => {
+        document.body.classList.toggle("modo-oscuro", toggle.checked);
+      });
+    };
+  </script>
+</head>
+
+<body>
+  <h1>🎬 Convertidor de YouTube</h1>
+
+  <div style="text-align: center; margin-bottom: 20px;">
+    <img id="preview" src="" alt="Miniatura del video" />
+  </div>
+
+  <div class="modo-toggle">
+    <label>
+      <input type="checkbox" id="toggleModo" />
+      Modo Oscuro
+    </label>
+  </div>
+
+  <div class="contenedor-flex">
+    <div class="bloque">
+      <h2>🎧 YouTube a Audio</h2>
+      <form id="formulario-audio" onsubmit="convertirAudio(event)">
+        <input type="text" name="url" placeholder="URL del video o playlist" required
+          oninput="mostrarMiniatura(this.value); verificarSiEsPlaylist(this);" />
+        <div id="selectorPlaylist" style="margin-bottom: 10px;"></div>
+        <label>Calidad:</label>
+        <select name="calidad">
+          <option value="320">320 kbps</option>
+          <option value="192" selected>192 kbps</option>
+        </select>
+        <label>Formato:</label>
+        <select name="formato">
+          <option value="mp3" selected>MP3</option>
+          <option value="wav">WAV</option>
+          <option value="ogg">OGG</option>
+        </select>
+        <label>Recortar (opcional)</label>
+        <input type="text" name="inicio" placeholder="Inicio (segundos)" pattern="^\\d*\\.?\\d*$" />
+        <input type="text" name="fin" placeholder="Fin (segundos)" pattern="^\\d*\\.?\\d*$" />
+        <button type="submit">Convertir</button>
+      </form>
+      <div id="progreso" style="display:none; margin-top:15px;">
+        <progress value="0" max="100" id="barraProgreso"></progress>
+        <div id="porcentaje">0%</div>
+      </div>
+    </div>
+
+    <div class="bloque">
+      <h2>📹 Descargar Video MP4</h2>
+      <form id="form-descargar-video" onsubmit="descargarVideo(event)">
+        <input type="text" name="url_video" placeholder="URL del video" required
+          oninput="mostrarMiniatura(this.value)" />
+        <label>Calidad video:</label>
+        <select name="calidad_video">
+          <option value="240">240p</option>
+          <option value="360">360p</option>
+          <option value="480">480p</option>
+          <option value="720" selected>720p</option>
+        </select>
+        <button type="submit" style="margin-top:15px;">Descargar Video</button>
+      </form>
+      <div id="progreso-video" style="display:none; margin-top:15px;">
+        <progress value="0" max="100" id="barraProgresoVideo"></progress>
+        <div id="porcentajeVideo">0%</div>
+      </div>
+    </div>
+  </div>
+
+  <hr />
+
+  <div class="historiales">
+    <div>
+      <h3>Historial de conversiones (Audio)</h3>
+      <div class="historial" id="historial-audio">{{ historial_audio | safe }}</div>
+    </div>
+    <div>
+      <h3>Historial de conversiones (Video)</h3>
+      <div class="historial" id="historial-video">{{ historial_video | safe }}</div>
+    </div>
+  </div>
+</body>
+</html>
