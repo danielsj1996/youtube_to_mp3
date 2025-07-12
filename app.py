@@ -4,8 +4,11 @@ import zipfile
 import uuid
 import threading
 import tempfile
+import glob
+import shutil
 import urllib.parse
 from datetime import datetime
+from yt_dlp.utils import DownloadError
 from flask import (
     Flask, request, send_file, redirect,
     render_template, jsonify, after_this_request
@@ -67,13 +70,12 @@ def convertir_todo(urls, calidad, formato, inicio, fin, id_tarea):
     try:
         carpeta = os.path.join(TEMP_DIR, id_tarea)
         os.makedirs(carpeta, exist_ok=True)
-        archivos_generados = []
 
         for url in urls:
             ydl_opts = {
                 "quiet": True,
                 "progress_hooks": [lambda d: hook(d, id_tarea)],
-                "outtmpl": f"{carpeta}/%(title)s.%(ext)s",
+                "outtmpl": f"{carpeta}/%(title)s.%(ext)s",   # dejamos que yt‑dlp nombre
                 "format": "bestaudio/best",
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
@@ -89,29 +91,38 @@ def convertir_todo(urls, calidad, formato, inicio, fin, id_tarea):
                 })
 
             with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = limpiar(info["title"]) + f".{formato}"
-                archivos_generados.append(os.path.join(carpeta, filename))
+                ydl.download([url])
 
-        # ─── Empaquetar o mover ───────────────────────────────
+        # ── TOMAMOS lo que realmente quedó en la carpeta
+        archivos_generados = glob.glob(os.path.join(carpeta, f"*.{formato}"))
+        if not archivos_generados:
+            raise RuntimeError("No se generó ningún archivo")
+
+        # empaquetar o mover
         if len(archivos_generados) > 1:
             zip_path = os.path.join(DESCARGAS_DIR, f"{id_tarea}.zip")
             with zipfile.ZipFile(zip_path, "w") as z:
                 for f in archivos_generados:
                     z.write(f, arcname=os.path.basename(f))
-            guardar_historial("historial_audio.txt", f"ZIP: {len(archivos_generados)} archivos convertidos")
+            guardar_historial("historial_audio.txt",
+                              f"ZIP: {len(archivos_generados)} archivos convertidos")
             resultados[id_tarea] = os.path.basename(zip_path)
         else:
-            origen = archivos_generados[0]
-            destino = os.path.join(DESCARGAS_DIR, os.path.basename(origen))
+            origen   = archivos_generados[0]
+            destino  = os.path.join(DESCARGAS_DIR,
+                                    os.path.basename(origen))
             os.replace(origen, destino)
-            guardar_historial("historial_audio.txt", os.path.basename(destino))
+            guardar_historial("historial_audio.txt",
+                              os.path.basename(destino))
             resultados[id_tarea] = os.path.basename(destino)
 
         progresos[id_tarea] = 100
     except Exception as e:
         print("Error en convertir_todo:", e)
         progresos[id_tarea] = -1
+    finally:
+        # Limpia la carpeta temp/<id_tarea> (aunque haya fallado)
+        shutil.rmtree(carpeta, ignore_errors=True)
 
 # ─── VIDEO ────────────────────────────────────────────────────
 @app.route("/descargar-video", methods=["POST"])
@@ -163,6 +174,8 @@ def descargar_y_procesar_video(url, formato_yt, id_tarea):
     except Exception as e:
         print("Error descargar_video:", e)
         progresos[id_tarea] = -1
+    finally:
+        shutil.rmtree(carpeta, ignore_errors=True)
 
 # ─── PROGRESO / RESULTADO ────────────────────────────────────
 @app.route("/progreso/<id>")
@@ -202,31 +215,30 @@ def descargar_directo(nombre):
 @app.route("/detectar_playlist", methods=["POST"])
 def detectar_playlist():
     url = request.form["url"].strip()
+    parsed  = urllib.parse.urlparse(url)
+    list_id = urllib.parse.parse_qs(parsed.query).get("list", [None])[0]
 
-    # ── si la URL es watch?v=…&list=… extraemos el id de la lista
-    parsed = urllib.parse.urlparse(url)
-    qs     = urllib.parse.parse_qs(parsed.query)
-    list_id = qs.get("list", [None])[0]
+    # ➊ Si es un mix RD… lo devolvemos como “no playlist”
+    if list_id and list_id.startswith("RD"):
+        return jsonify({"es_playlist": False})
 
-    # armamos la URL definitiva de la playlist
     playlist_url = f"https://www.youtube.com/playlist?list={list_id}" if list_id else url
 
     try:
-        with YoutubeDL({
-            "quiet": True,
-            "extract_flat": True,
-            "skip_download": True,
-        }) as ydl:
+        with YoutubeDL({"quiet": True,
+                        "extract_flat": True,
+                        "skip_download": True}) as ydl:
             info = ydl.extract_info(playlist_url, download=False)
             if info.get("_type") == "playlist":
                 return jsonify({
                     "es_playlist": True,
-                    "videos": [
-                        {"title": e["title"], "url": e["url"]}
-                        for e in info.get("entries", [])
-                    ],
+                    "videos": [{"title": e["title"], "url": e["url"]}
+                               for e in info.get("entries", [])]
                 })
-    except Exception as e:
+    except DownloadError as e:
+        # ➋ Cualquier playlist “unviewable” ⇒ devolvemos False
+        if "unviewable" in str(e):
+            return jsonify({"es_playlist": False})
         print("Error al detectar playlist:", e)
 
     return jsonify({"es_playlist": False})
